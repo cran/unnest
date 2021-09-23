@@ -1,4 +1,3 @@
-
 inset <- `[<-`
 
 is.unnest.spec <- function(x) {
@@ -22,25 +21,36 @@ print.unnest.spec <- function(x, ...) {
   str(x, give.head = FALSE, no.list = TRUE, give.attr = FALSE)
 }
 
-#' Unnest spec is a nested list with the same structure as the nested json. It
-#' specifies concisely how the deeply nested components ought to be
-#' unnested. `s()` is a shorthand for `spec()`.
-#' @rdname unnest
-#' @param selector A shorthand syntax for an `include` selector. When a list
-#'   each element of the list is expanded into the `include` element at the
-#'   respective level. When `selector` is a string it is expanded into a list
-#'   according to the following rules:
+#' @title Unnest spec
 #'
-#'   \enumerate{
-#'      \item When selector is length 1 and contains "/" characters it is split
-#'            with "/" separator. For instance `s(c("a", "b"), ...)`,  `s("a/b", ...)`
-#'            and `s("a", s("b", ...))` are all converted to a canonical `s(include =
-#'            "a", s(include = "b", ...))`. Components consisting entirely of digits are converted to integer. For
-#'            example `s("a/2/b" ...)` is equivalent to `s("a", s(2, s("b", ...)))`
-#'      \item Each element of the resulting from the previous step vector is
-#'            split with `,`. Thus `s("a/b,c/d")` is equivalent to `s("a",
-#'            s(include = c("b", "c"), s("d", ...)))`
-#'  }
+#' @description Unnest spec is a nested list with the same structure as the
+#'   nested json. It specifies how the deeply nested lists ought to be
+#'   unnested. `spec()` is a handy constructor for spec lists. `s()` is a
+#'   shorthand alias for `spec()`.
+#'
+#' @rdname spec
+#' @param selector A shorthand syntax for an `include` parameter. Can be a list
+#'   or a character vector.
+#'
+#' \enumerate{
+#'
+#'    \item When `selector` is a list or a character vector with length greater
+#'    than 1, each element is an include parameter at the corresponding
+#'    level. For example `s(c("a", "b"), ...)` is equivalent to `s(include =
+#'    "a", s(include = "b", ...))`
+#'
+#'    \item When `selector` is a character of length 1 and contains "/"
+#'    characters it is split with "/" first. For instance `s(c("a", "b"), ...)`,
+#'    `s("a/b", ...)` and `s("a", s("b", ...))` are all equivalent to the
+#'    canonical `s(include = "a", s(include = "b", ...))`. Components consisting
+#'    entirely of digits are converted to integers. For example `s("a/2/b" ...)`
+#'    is equivalent to `s("a", s(2, s("b", ...)))`
+#'
+#'    \item Multiple `include` fields can be separated with `,`. For example
+#'      `s("a/b,c/d")` is equivalent to `s("a", s(include = c("b", "c"), s("d",
+#'      ...)))`
+#'
+#' }
 #' @param as name for this field in the extracted data.frame
 #' @param children,... Unnamed list of children spec. `...` is merged into
 #'   `children`. `children` is part of the canonical spec.
@@ -53,23 +63,25 @@ print.unnest.spec <- function(x, ...) {
 #'   specifying components to include or exclude. A list can combine numeric
 #'   indexes and character elements to extract.
 #' @param stack Whether to stack this node (TRUE) or to spread it (FALSE). When
-#'   `stack`is a string an index column is created with that name.
+#'   `stack` is a string an index column is created with that name.
 #' @param process Extra processing step for this element. Either NULL for no
-#'   processing (the default), "asis" to return the entire element "as is" in a
-#'   list column, or "paste" to paste elements together into a character column.
-#' @return A canonical spec; a list suitable for the C level unnest routine.
+#'   processing (the default), "as_is" to return the entire element in a list
+#'   column, "paste" to paste elements together into a character column.
+#' @param default Default value to insert if the `include` specification hasn't
+#'   matched.
+#' @return `s()`: a canonical spec - a list consumed by C++ unnesting routines.
 #' @examples
 #'
-#' ## `s()` returns a canonical spec list
 #' s("a")
 #' s("a//c2")
 #' s("a/2/c2,cid")
 #'
 #' @export
-s <- function(selector = NULL, ..., as = NULL,
+spec <- function(selector = NULL, ..., as = NULL,
               children = NULL, groups = NULL,
               include = NULL, exclude = NULL,
-              stack = NULL, process = NULL) {
+              stack = NULL, process = NULL,
+              default = NULL) {
   children <- c(children, list(...))
   children <- children[!sapply(children, is.null)]
   if (is.unnest.spec(selector)) {
@@ -103,10 +115,11 @@ s <- function(selector = NULL, ..., as = NULL,
           if (!is.null(as)) list(as = as),
           if (!is.null(include)) list(include = include),
           if (!is.null(exclude)) list(exclude = exclude),
-          if (!is.null(stack))  list(stack = stack),
-          if (!is.null(process))  list(process = process),
+          if (!is.null(stack)) list(stack = stack),
+          if (!is.null(process)) list(process = process),
+          if (!is.null(default)) list(default = default),
           if (length(children) > 0) list(children = children),
-          if (!is.null(groups)) list(groups = groups))
+          if (length(groups) > 0) list(groups = groups))
 
   first <- TRUE
   tel <- el
@@ -128,20 +141,21 @@ s <- function(selector = NULL, ..., as = NULL,
              else if (!is.null(el[["as"]])) "",
         stack = stack,
         process = process,
+        default = default,
         include = include,
         exclude = exclude,
         children = if(first) el[["children"]] else list(tel),
         groups = groups))
-    include <- exclude <- stack <- process <- groups <- NULL
+    include <- exclude <- stack <- process <- default <- groups <- NULL
     first <- FALSE
   }
   el <- tel
   unnest.spec(el)
 }
 
-#' @rdname unnest
+#' @rdname spec
 #' @export
-spec <- s
+s <- spec
 
 convert_to_tible <- function(x) {
   if (!is.data.frame(x))
@@ -160,22 +174,36 @@ convert_to_dt <- function(x) {
   }
 }
 
-#' Unnest nested lists
+
+#' Unnest lists
+#'
+#' Unnest nested lists into a flat data.frames.
 #'
 #' @param x a nested list to unnest
 #' @param spec spec to use for unnesting. See [`spec()`].
 #' @param dedupe whether to dedupe repeated elements. If TRUE, if a node is
 #'   visited for a second time and is not explicitly declared in the `spec` the
 #'   node is skipped. This is particularly useful with `group`ed specs.
-#' @param stack_atomic Whether atomic vectors should be stacked or not.
+#' @param stack_atomic Whether atomic leaf vectors should be stacked or not. If
+#'   NULL, the default, data.frame vectors are stacked, all others are spread.
+#' @param process_atomic Process spec for atomic leaf vectors. Either NULL for
+#'   no processing (the default), "as_is" to return the entire element in a list
+#'   column, "paste" to paste elements together into a character column.
+#' @param process_unnamed_lists How to process unnamed lists. Can be one of
+#'   "as_is" - return a list column, "exclude" - drop these elements unless they
+#'   are explicitly included in the spec, "paste" - return a character column,
+#'   "stack" - automatically stack. If NULL (the default), do nothing - process
+#'   them normally according to the specs.
 #' @param cross_join Specifies how the results from sibling nodes are joined
-#'   (`cbind`) together. The shorter data.frames (in terms o number of rows) can
-#'   be either recycled to the max number of rows across all components as with
-#'   standard R's recycling (`cross_join = FALSE`). Or, with `cross_join =
-#'   TRUE`, the results are cross joined (aka form all combinations of rows
-#'   across joined components). `cross_join = TRUE` is the default because of no
-#'   data loss and it is more conducive for earlier error detection with
-#'   incorrect specs.
+#'   (`cbind`ed) together. The shorter data.frames (fewer rows) can be either
+#'   recycled to the max number of rows across all joined components with
+#'   `cross_join = FALSE`. Or, the results are cross joined (produce all
+#'   combinations of rows across all components) with `cross_join =
+#'   TRUE`. `cross_join = TRUE` is the default because of no data loss and it is
+#'   more conducive for earlier error detection with incorrect specs
+#'
+#' @return A `data.frame`, `data.table` or a `tibble` as specified by the option
+#'   `unnest.return.type`. Defaults to `data.frame`.
 #' @examples
 #'
 #' x <- list(a = list(b = list(x = 1, y = 1:2, z = 10),
@@ -221,24 +249,34 @@ convert_to_dt <- function(x) {
 #'          groups = list(first = s("a/b/x,y"),
 #'                        second = s("a/b"))))
 #'
-#' ## processing asis
+#' ## processing as_is
 #' str(unnest(xxx, s(stack = "id",
-#'                   s("a/b/y", process = "asis"),
-#'                   s("a/c", process = "asis"))))
-#' str(unnest(xxx, s(stack = "id", s("a/b/", process = "asis"))))
-#' str(unnest(xxx, s(stack = "id", s("a/b", process = "asis"))))
+#'                   s("a/b/y", process = "as_is"),
+#'                   s("a/c", process = "as_is"))))
+#' str(unnest(xxx, s(stack = "id", s("a/b/", process = "as_is"))))
+#' str(unnest(xxx, s(stack = "id", s("a/b", process = "as_is"))))
 #'
 #' ## processing paste
 #' str(unnest(x, s("a/b/y", process = "paste")))
 #' str(unnest(xxx, s(stack = TRUE, s("a/b/", process = "paste"))))
 #' str(unnest(xxx, s(stack = TRUE, s("a/b", process = "paste"))))
 #'
+#' ## default
+#' unnest(x, s("a/b/c/", s("b", default = 100)))
+#' unnest(x, s("a/b/c/", stack = "ix", s("b", default = 100)))
+#'
 #' @export
-unnest <- function(x, spec = NULL, dedupe = FALSE, stack_atomic = FALSE, cross_join = TRUE) {
+unnest <- function(x, spec = NULL, dedupe = FALSE,
+                   stack_atomic = NULL,
+                   process_atomic = NULL,
+                   process_unnamed_lists = NULL,
+                   cross_join = TRUE) {
   if (!is.null(spec) && !inherits(spec, "unnest.spec")) {
     stop("`spec` argument must be of class `unnest.spec`", call. = FALSE)
   }
-  out <- .Call(C_unnest, x, spec, dedupe, stack_atomic, cross_join)
+  out <- .Call(C_unnest, x, spec, dedupe, stack_atomic,
+               process_atomic, process_unnamed_lists,
+               cross_join)
   switch(getOption("unnest.return.type", "data.frame"),
          data.frame = out,
          tibble = convert_to_tible(out),

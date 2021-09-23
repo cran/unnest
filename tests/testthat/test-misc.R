@@ -1,5 +1,85 @@
 context("Misc")
 
+test_that("Automatic treatment of data.frames works",  {
+  dd <- list(a = df(b = 1:2, c = 11:12, d = c("21", "22")))
+  expect_equal(unnestl(dd, s("a")),
+               list(a.b = 1:2, a.c = 11:12, a.d = c("21", "22")))
+  expect_equal(unnestl(dd, s("a"), stack_atomic = F),
+               list(a.b = 1L, a.b.2 = 2L, a.c = 11L, a.c.2 = 12L, a.d = "21", a.d.2 = "22"))
+  expect_equal(unnestl(dd, s("a/b,d")),
+               list(a.b = 1:2, a.d = c("21", "22")))
+  expect_equal(unnestl(dd, s("a/b,d/", stack = T)),
+               list(a.b = 1:2, a.d = c("21", "22")))
+  expect_equal(unnestl(dd, s("a/b,d/", stack = F)),
+               list(a.b = 1L, a.b.2 = 2L, a.d = "21", a.d.2 = "22"))
+  expect_equal(unnest(dd, s("a", as = "", s("/", stack = T))),
+               dd$a)
+  expect_equal(unnestl(dd, s("a//", stack = T)),
+               list(a.b = 1:2, a.c = 11:12, a.d = c("21", "22")))
+  expect_equal(unnestl(dd, s("a/", stack = "ix")),
+               list(a = c("1", "2", "11", "12", "21", "22"),
+                    a.ix = c("b", "b", "c", "c", "d", "d")))
+  expect_equal(unnest(dd, s("a/", stack = "ix"), stack_atomic = T),
+               unnest(dd, s("a/", stack = "ix")))
+  expect_equal(unnestl(dd, s("a/", stack = "ix"), stack_atomic = F),
+               list(a = c("1", "11", "21"),
+                    a.2 = c("2", "12", "22"),
+                    a.ix = c("b", "c", "d")))
+  expect_equal(unnest(dd, s("a/", stack = "ix"), stack_atomic = F),
+               unnest(dd, s("a/", stack = "ix", s(stack = F))))
+})
+
+# test_that("List columns in data.frames work",  {
+#   ## not entire sure about this behavior but it seems safer to not stack list nodes
+#   dd <- list(a = df(b = 1:2))
+#   dd$a$c <- list(c("a1", "a2"), "b")
+#   unnest(dd, s("a/"))
+#   unnest(dd, s("a//", stack = T))
+#   unnest(dd, s("a",
+#                s("c", process = "asis")))
+# })
+
+test_that("Default works", {
+  expect_equal(unnestl(xx, s(stack = "x.id", s("a/b/c/", s("c", default = 100)))),
+               list(a.b.c.1.c = c(100, 100),
+                    a.b.c.2.c = c(2, 2),
+                    a.b.c.3.c = c(100, 100),
+                    x.id = 1:2))
+
+  expect_equal(unnestl(xx, s(stack = "x.id", s("a/b/c/", stack = "cix", s("c", default = 100)))),
+               list(a.b.c.c = c(100, 2, 100, 100, 2, 100),
+                    a.b.c.cix = c(1L, 2L, 3L, 1L, 2L, 3L),
+                    x.id = c(1L, 1L, 1L, 2L, 2L, 2L)))
+
+  expect_equal(unnestl(xx, s(stack = "x.id", s("a/b/c/", stack = "cix",
+                                               s("a"),
+                                               s("c", default = 100),
+                                               s("b", default = 200)))),
+               list(a.b.c.a = c(1, 2, 3, 1, 2, 3),
+                    a.b.c.b = c(1, 200, 3, 1, 200, 3),
+                    a.b.c.c = c(100, 2, 100, 100, 2, 100),
+                    a.b.c.cix = c(1L, 2L, 3L, 1L, 2L, 3L), x.id = c(1L, 1L, 1L, 2L, 2L, 2L)))
+
+  ## this doesn't work. We need selector to indicate what is actually missing
+  # unnest(xx, s(stack = "x.id", s("a/b/c/", stack = "cix", s(default = 100))))
+
+  xx2 <- xx
+  xx2[[1]]$a$b$c[[1]][[2]] <- NULL
+
+  expect_equal(unnestl(xx2, s(stack = "x.id", s("a/b/c/", stack = "cix", s("b", default = 100)))),
+               list(a.b.c.b = c(100, 100, 3, 1, 100, 3),
+                    a.b.c.cix = c(1L, 2L, 3L, 1L, 2L, 3L),
+                    x.id = c(1L, 1L, 1L, 2L, 2L, 2L)))
+
+  expect_equal(unnestl(xx2, s(stack = "x.id", s("a/b/c/", stack = "cix", s("2", default = 100)))),
+               list(a.b.c.2 = c(100, NA, NA, NA, NA, NA),
+                    a.b.c.b = c(NA, NA, 3, 1, NA, 3),
+                    a.b.c.c = c(NA, 2, NA, NA, 2, NA),
+                    a.b.c.cix = c(1L, 2L, 3L, 1L, 2L, 3L),
+                    x.id = c(1L, 1L, 1L, 2L, 2L, 2L)))
+
+})
+
 test_that("Stacking atomic vectors works", {
 
   expect_equal(unnest(y, stack_atomic = T),

@@ -36,19 +36,23 @@ struct NodeAccumulator {
 };
 
 
-// cannot define templates in non-templates class, so have to do this extraction
+// Need to extract this method as C++ does not allows templates in a
+// non-templated class.
 template<class UT, class AT>
 void add_node(UT& U, AT& acc, VarAccumulator& vacc,
               const Spec& pspec, const Spec& spec,
-              uint_fast32_t ix, SEXP x) {
-  if (x == R_NilValue || XLENGTH(x) == 0)
-    return; // XLENGTH doesn't work on NULL
+              uint_fast32_t ix, SEXP x,
+              bool stack_atomic = false) {
+  // XLENGTH doesn't work on NULL
+  if (x == R_NilValue || XLENGTH(x) == 0) {
+    return;
+  }
   P("-> add_node(%ld); vacc: %p; has_var: %d %s\n", ix, &vacc, vacc.has_var(ix), spec.to_string().c_str());
   if (pspec.terminal && vacc.has_var(ix)) {
     P("   already has var %ld\n", ix);
     return;
   }
-  U.add_node_impl(acc, vacc, pspec, spec, ix, x);
+  U.add_node_impl(acc, vacc, pspec, spec, ix, x, stack_atomic);
   if (spec.terminal) {
     vacc.insert(ix);
   }
@@ -56,8 +60,15 @@ void add_node(UT& U, AT& acc, VarAccumulator& vacc,
 
 struct Unnester {
 
+  enum ProcessUnnamed {NONE, STACK, EXCLUDE, ASIS, PASTE};
+  ProcessUnnamed sexp2unnamed(SEXP x);
+
+
   bool dedupe;
   bool stack_atomic;
+  bool stack_atomic_df;
+  Spec::Process process_atomic;
+  ProcessUnnamed process_unnamed_list;
   bool rep_to_max;
 
   cpair2ix_map cp2i;
@@ -156,25 +167,42 @@ struct Unnester {
 
   void add_node_impl(NodeAccumulator& acc, VarAccumulator& vacc,
                      const Spec& pspec, const Spec& spec,
-                     uint_fast32_t ix, SEXP x) {
-    // LENGTH(X) > 0 here
+                     uint_fast32_t ix, SEXP x, bool stack_atomic) {
+    // LENGTH(X) > 0 and X != NULL in here
     if (pspec.process == Spec::Process::ASIS) {
       acc.pnodes.push_front(make_unique<AsIsNode>(ix, x));
-      P("<--- added ASIS node impl:%s(%ld) acc[%ld,%ld]\n",
-        full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
+      P("<--- added ASIS node impl:%s(%ld) acc[%ld,%ld]\n", full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
     } else if (pspec.process == Spec::Process::PASTE) {
       acc.pnodes.push_front(make_unique<PasteNode>(ix, x));
-      P("<--- added PASTE node impl:%s(%ld) acc[%ld,%ld]\n",
-        full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
+      P("<--- added PASTE node impl:%s(%ld) acc[%ld,%ld]\n", full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
     } else if (TYPEOF(x) == VECSXP) {
       // Lists
+      bool is_unnamed = Rf_getAttrib(x, R_NamesSymbol) == R_NilValue;
+      if (is_unnamed && pspec.terminal && spec.stack == Spec::Stack::AUTO) {
+        /* PP("pspec: %s\n", pspec.to_string().c_str()); */
+        /* PP("spec: %s\n", spec.to_string().c_str()); */
+        if (this->process_unnamed_list == ProcessUnnamed::EXCLUDE) {
+          P("<--- excluded UNNAMED node impl:%s(%ld) acc[%ld,%ld]\n", full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
+          return;
+        } else if (this->process_unnamed_list == ProcessUnnamed::ASIS) {
+          acc.pnodes.push_front(make_unique<AsIsNode>(ix, x));
+          P("<--- added UNNAMED-ASIS node impl:%s(%ld) acc[%ld,%ld]\n", full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
+          return;
+        } else if (this->process_unnamed_list == ProcessUnnamed::PASTE) {
+          acc.pnodes.push_front(make_unique<PasteNode>(ix, x));
+          P("<--- added UNNAMED-PASTE node impl:%s(%ld) acc[%ld,%ld]\n", full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
+          return;
+        }
+      }
+      stack_atomic = stack_atomic || (this->stack_atomic_df && is_data_frame(x));
       P("--> add_node_impl:%s(%ld) %s\n", full_name(ix).c_str(), ix, spec.to_string().c_str());
       const vector<SpecMatch>& matches = spec.match(x);
-      P("    nr. matches: %ld\n", matches.size());
-      if (spec.stack == Spec::Stack::STACK) {
-        stack_nodes(acc, vacc, pspec, spec, ix, matches, is_data_frame(x));
+      P("    nr. matches: %ld, stack_atomic: %d\n", matches.size(), stack_atomic);
+      if (spec.stack == Spec::Stack::STACK ||
+          (is_unnamed && this->process_unnamed_list == ProcessUnnamed::STACK)) {
+        stack_nodes(acc, vacc, pspec, spec, ix, matches, stack_atomic);
       } else {
-        spread_nodes(acc, vacc, pspec, spec, ix, matches);
+        spread_nodes(acc, vacc, pspec, spec, ix, matches, stack_atomic);
       }
       P("<-- added node impl:%s(%ld) acc[%ld,%ld]\n",
         full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
@@ -184,25 +212,39 @@ struct Unnester {
         P("---> add atomic node impl:%s(%ld) %s\n",
           full_name(ix).c_str(), ix, spec.to_string().c_str());
         R_xlen_t N = XLENGTH(x);
-        if (spec.stack == Spec::Stack::STACK ||
-            (this->stack_atomic && spec.stack == Spec::Stack::AUTO)) {
+        if (spec.process != Spec::Process::NONE &&
+            (spec.process != Spec::Process::PASTE_STRING ||
+             TYPEOF(x) == STRSXP)) {
           if (spec.process == Spec::Process::ASIS) {
             acc.pnodes.push_front(make_unique<AsIsNode>(ix, x));
-            P("<--- added ASIS atomic node impl:%s(%ld) acc[%ld,%ld]\n",
-              full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
-          } else if (spec.process == Spec::Process::PASTE) {
+            P("<--- added ASIS atomic node impl:%s(%ld) acc[%ld,%ld]\n", full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
+          } else if (spec.process == Spec::Process::PASTE ||
+                     spec.process == Spec::Process::PASTE_STRING) {
             acc.pnodes.push_front(make_unique<PasteNode>(ix, x));
-            P("<--- added PASTE atomic node impl:%s(%ld) acc[%ld,%ld]\n",
-              full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
-          }else {
-            acc.pnodes.push_front(make_unique<SexpNode>(ix, x));
-            if (this->rep_to_max)
-              acc.nrows = max(acc.nrows, N);
-            else
-              acc.nrows *= N;
-            P("<--- added stacked atomic node impl:%s(%ld) acc[%ld,%ld]\n",
-              full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
+            P("<--- added PASTE atomic node impl:%s(%ld) acc[%ld,%ld]\n", full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
           }
+        } else if (this->process_atomic != Spec::Process::NONE &&
+                   (this->process_atomic != Spec::Process::PASTE_STRING ||
+                    TYPEOF(x) == STRSXP)) {
+          P("this->process_atomic: %s\n", spec.process_names.at(this->process_atomic).c_str());
+          if (this->process_atomic == Spec::Process::ASIS) {
+            acc.pnodes.push_front(make_unique<AsIsNode>(ix, x));
+            P("<--- added ASIS atomic node impl:%s(%ld) acc[%ld,%ld]\n", full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
+          } else if (this->process_atomic == Spec::Process::PASTE ||
+                     this->process_atomic == Spec::Process::PASTE_STRING) {
+            acc.pnodes.push_front(make_unique<PasteNode>(ix, x));
+            P("<--- added PASTE atomic node impl:%s(%ld) acc[%ld,%ld]\n", full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
+          }
+        } else if (spec.stack == Spec::Stack::STACK ||
+                   (spec.stack == Spec::Stack::AUTO &&
+                    (stack_atomic || this->stack_atomic))) {
+          acc.pnodes.push_front(make_unique<SexpNode>(ix, x));
+          if (stack_atomic || this->rep_to_max)
+            acc.nrows = max(acc.nrows, N);
+          else
+            acc.nrows *= N;
+          P("<--- added stacked atomic node impl:%s(%ld) acc[%ld,%ld]\n",
+            full_name(ix).c_str(), ix, acc.nrows, acc.pnodes.size());
         } else {
           // current implementation doesn't allow spec at a sub-vector level
           if (N == 1) {
@@ -222,11 +264,12 @@ struct Unnester {
 
   void add_node_impl(vector<NodeAccumulator>& accs, VarAccumulator& vacc,
                      const Spec& pspec, const Spec& spec,
-                     uint_fast32_t ix, SEXP x) {
+                     uint_fast32_t ix, SEXP x, bool stack_atomic = false) {
     if (TYPEOF(x) == VECSXP) {
       if (spec.stack == Spec::Stack::STACK) {
         const vector<SpecMatch>& matches = spec.match(x);
-        stack_nodes(accs, vacc, pspec, spec, 0, matches, is_data_frame(x));
+        stack_nodes(accs, vacc, pspec, spec, 0, matches,
+                    stack_atomic || (this->stack_atomic_df && is_data_frame(x)));
       } else {
         Rf_error("Grouped spreading is not yet implemented");
       }
@@ -238,23 +281,25 @@ struct Unnester {
 
   inline void dispatch_match_to_child(NodeAccumulator& acc, VarAccumulator& vacc,
                                       const Spec& pspec, const Spec& spec,
-                                      uint_fast32_t cix, const SpecMatch& m) {
+                                      uint_fast32_t cix, const SpecMatch& m,
+                                      bool stack_atomic = false) {
     P("---> dispatching cix:%ld %s %s\n", cix, m.to_string().c_str(), spec.to_string().c_str());
     if (spec.children.empty()) {
-      add_node(*this, acc, vacc, spec, NilSpec, cix, m.obj);
+      add_node(*this, acc, vacc, spec, NilSpec, cix, m.obj, stack_atomic);
     } else {
       for (const Spec& cspec: spec.children) {
-        add_node(*this, acc, vacc, spec, cspec, cix, m.obj);
+        add_node(*this, acc, vacc, spec, cspec, cix, m.obj, stack_atomic);
       }
     }
   }
 
   inline void spread_nodes(NodeAccumulator& acc, VarAccumulator& vacc,
                            const Spec& pspec, const Spec& spec,
-                           uint_fast32_t ix, const vector<SpecMatch>& matches) {
+                           uint_fast32_t ix, const vector<SpecMatch>& matches,
+                           bool stack_atomic) {
     for (const SpecMatch& m: matches) {
       uint_fast32_t cix = child_ix(ix, m);
-      dispatch_match_to_child(acc, vacc, pspec, spec, cix, m);
+      dispatch_match_to_child(acc, vacc, pspec, spec, cix, m, stack_atomic);
     }
   }
 
@@ -280,7 +325,8 @@ struct Unnester {
     if (Ngr == 0) {
       NodeAccumulator acc;
       add_node(*this, acc, vacc, NilSpec, spec, 0, x);
-      return build_df(acc, vacc);
+      SEXP out = build_df(acc, vacc);
+      return out;
     } else {
       SEXP names = PROTECT(Rf_allocVector(STRSXP, Ngr));
       SEXP out = PROTECT(Rf_allocVector(VECSXP, Ngr));
@@ -303,6 +349,9 @@ struct Unnester {
 
     size_t ncols = acc.pnodes.size();
     size_t nrows = (ncols > 0 ? acc.nrows : 0);
+    if (acc.nrows < 0) {
+      Rf_error("Output exceeds 64bit vector length. Wrong spec, or you want 'cross_join = FALSE'?");
+    }
 
     P("FINAL: nrow:%ld ncol:%ld\n", nrows, ncols);
     // temporary output holder to avoid protecting each element

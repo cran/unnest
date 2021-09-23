@@ -23,12 +23,16 @@ Spec::Process sexp2process(SEXP x) {
     return Spec::Process::NONE;
   if (TYPEOF(x) == STRSXP) {
     const char* nm = CHAR(STRING_ELT(x, 0));
-    if (!strcmp(nm, "asis"))
+    if (!strcmp(nm, "as_is") || !strcmp(nm, "as.is") || !strcmp(nm, "asis"))
       return Spec::Process::ASIS;
     else if (!strcmp(nm, "paste"))
       return Spec::Process::PASTE;
+    else if (!strcmp(nm, "paste_strings"))
+      return Spec::Process::PASTE_STRING;
   }
-  Rf_error("Invalid `process` argument. Must be one of 'asis', 'paste' or NULL");
+  // don't popularize paste_strings as yet. Not very useful in practice as
+  // string vectors come as lists usually.
+  Rf_error("Invalid `process` or `process_atomic` argument. Must be one of 'as_is', 'paste' or NULL");
 }
 
 vector<SpecMatch> Spec::match(SEXP obj) const {
@@ -58,6 +62,10 @@ vector<SpecMatch> Spec::match(SEXP obj) const {
           continue;
         SEXP nm = has_names ? STRING_ELT(obj_names, ix) : R_NilValue;
         out.emplace_back(ix, name, nm, VECTOR_ELT(obj, ix));
+      } else {
+        if (defsexp != R_NilValue) {
+          out.emplace_back(ix, name, R_NilValue, defsexp);
+        }
       }
     }
   } else if (exclude_ixes.size() > 0) {
@@ -74,17 +82,30 @@ vector<SpecMatch> Spec::match(SEXP obj) const {
     if (exclude_names.size() > 0)
       out.reserve(N);
 
+    vector<bool> processed(include_names.size(), false);
+
     for (int i = 0; i < N; i++) {
       SEXP nm = R_NilValue;
       nm = STRING_ELT(obj_names, i);
-      if (is_char_in_strvec(nm, exclude_names)) {
-        continue;
-      } else if (include_names.size() > 0) {
-        if (!is_char_in_strvec(nm, include_names)) {
-          continue;
+      if (ix_char_in_strvec(nm, exclude_names) < 0) {
+        if (include_names.size() > 0) {
+          R_xlen_t ix = ix_char_in_strvec(nm, include_names);
+          if (ix >= 0) {
+            out.emplace_back(i, name, nm, VECTOR_ELT(obj, i));
+            processed[ix] = true;
+          }
+        } else {
+          out.emplace_back(i, name, nm, VECTOR_ELT(obj, i));
         }
       }
-      out.emplace_back(i, name, nm, VECTOR_ELT(obj, i));
+    }
+
+    if (defsexp != R_NilValue) {
+      for (size_t i = 0; i < processed.size(); i++) {
+        if (!processed[i]) {
+          out.emplace_back(-1, name, include_names[i], defsexp);
+        }
+      }
     }
   }
 
@@ -132,7 +153,8 @@ Spec sexp2spec(SEXP lspec) {
   bool done_as = false,
     done_children = false, done_groups = false,
     done_stack = false, done_process = false,
-    done_include = false, done_exclude = false;
+    done_include = false, done_exclude = false,
+    done_default = false;
   SEXP children = R_NilValue, groups = R_NilValue;
 
   Spec spec;
@@ -156,6 +178,9 @@ Spec sexp2spec(SEXP lspec) {
       } else if (!done_process && !strcmp(nm, "process")) {
         spec.process = sexp2process(obj);
         done_process = true;
+      } else if (!done_default && !strcmp(nm, "default")) {
+        spec.defsexp = obj;
+        done_default = true;
       } else if (!done_children && !strcmp(nm, "children")) {
         if (TYPEOF(obj) != VECSXP)
           Rf_error("spec's 'children' field must be a list");
@@ -192,7 +217,7 @@ Spec sexp2spec(SEXP lspec) {
 
   if (groups != R_NilValue) {
     R_xlen_t NG = XLENGTH(groups);
-    SEXP gnames = Rf_getAttrib(groups, R_NamesSymbol);
+    SEXP gnames = PROTECT(Rf_getAttrib(groups, R_NamesSymbol));
     if (gnames == R_NilValue)
       Rf_error("groups must be a named list");
     spec.groups.reserve(NG);
@@ -201,6 +226,7 @@ Spec sexp2spec(SEXP lspec) {
         spec_group(STRING_ELT(gnames, g), VECTOR_ELT(groups, g));
       spec.groups.push_back(gr);
     }
+    UNPROTECT(1);
   }
 
   spec.set_terminal();
