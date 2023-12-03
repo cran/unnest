@@ -1,3 +1,8 @@
+Version 0.0.5
+=============
+
+- Fix CRAN format compile warnings
+
 Version 0.0.4
 =============
 
